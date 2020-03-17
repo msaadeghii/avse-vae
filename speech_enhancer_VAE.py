@@ -12,7 +12,7 @@ import soundfile as sf
 import librosa
 import torch.nn as nn
 
-from MCEM_algo import MCEM_algo, MCEM_algo_cvae
+from MCEM_algo import MCEM_algo, MCEM_algo_cvae, VI_MCEM_algo
 
 from AV_VAE import myVAE, CVAERTied, myDecoder, CDecoderRTied
 import os
@@ -31,7 +31,7 @@ landmarks_dim = 67*67 # if you use raw video data, this dimension should be 67*6
 
 #%% MCEM algorithm parameters
 
-niter_MCEM = 200 # number of iterations for the MCEM algorithm
+niter_MCEM = 100 # number of iterations for the MCEM algorithm
 niter_MH = 40 # total number of samples for the Metropolis-Hastings algorithm
 burnin = 30 # number of initial samples to be discarded
 var_MH = 0.01 # variance of the proposal distribution
@@ -293,3 +293,68 @@ sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
 sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
             
 print('AV-CVAE finished ...')        
+
+
+#%% Here, we test the performance of conditional VAE (CVAE) for audio-visual speech enhancement. The CVAE here contains a feature extractor that is
+#   shared among all the visual subnetworks. That's why we put a "Tied" in its name
+# We use a mixed VI-MCEM method to estimate the parameters
+
+saved_model_av_cvae = os.path.join(saved_models, 'AV_CVAE_checkpoint.pt')     
+# Loading the pre-trained model:
+vae = CVAERTied(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+           activation = activation, activationV = activationv).to(device)
+
+checkpoint = torch.load(saved_model_av_cvae, map_location = 'cpu')
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+   
+decoder = CDecoderRTied(vae)
+
+
+vae.eval()
+decoder.eval()
+
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture
+    
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v)
+    z = torch.t(z)
+    mu_z, logvar_z = vae.zprior(v)
+    
+Z_init = z.numpy() 
+mu_z = mu_z.numpy()
+logvar_z = logvar_z.numpy()
+
+# Instanciate the MCEM algo
+vi_mcem_algo = VI_MCEM_algo(mu_z, logvar_z, X=X, W=W0, H=H0, Z=Z_init, v = v, decoder=decoder,
+                      niter_VI_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin, var_MH=var_MH)
+
+# Run the MCEM algo
+S_hat, N_hat = vi_mcem_algo.run()
+
+# Separate the sources from the estimated parameters
+#vi_mcem_algo.separate( niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+# save the results:
+save_vae = os.path.join(save_dir, 'AV-CVAE-VI')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+            
+print('AV-CVAE-VI finished ...')        
