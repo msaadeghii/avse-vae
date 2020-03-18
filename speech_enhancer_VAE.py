@@ -294,6 +294,73 @@ sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
             
 print('AV-CVAE finished ...')        
 
+#%% Here, we test the performance of audio-only VAE. For that, we need to set blockVenc = 1 and blockVdec = 1 such that
+#   the path from visual data in the encoder and decoder is blocked.
+#   The inference algorithm is based on a VI-MCEM method.
+
+saved_model_a_vae = os.path.join(saved_models, 'A_VAE_checkpoint.pt')  
+# Loading the pre-trained model:  
+vae = myVAE(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+            activation = activation, activationv = activationv,
+            blockZ = 0., blockVenc = 1., blockVdec = 1.,
+            x_block = 0., landmarks_dim = 1280).to(device)
+
+checkpoint = torch.load(saved_model_a_vae, map_location = 'cpu') 
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+decoder = myDecoder(vae)
+
+# As we do not train the models, we set them to the "eval" mode:
+vae.eval()
+decoder.eval()
+
+v0 = np.zeros((Nl, 1280))
+v0 = torch.from_numpy(v0.astype(np.float32))
+v0.requires_grad = False
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture 
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v0)
+    z = torch.t(z)
+    
+Z_init = z.numpy()    
+
+mu_z = np.zeros_like(Z_init.T)
+logvar_z = np.ones_like(Z_init.T)
+
+# Instanciate the MCEM algo
+vi_mcem_algo = VI_MCEM_algo(mu_z, logvar_z, X=X, W=W0, H=H0, Z=Z_init, v = v0, decoder=decoder,
+                      niter_VI_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin, var_MH=var_MH)
+
+# Run the MCEM algo
+S_hat, N_hat = vi_mcem_algo.run()
+
+# Separate the sources from the estimated parameters
+#vi_mcem_algo.separate( niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+# save the results:
+save_vae = os.path.join(save_dir, 'A-VAE-VI')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+            
+print('A-VAE-VI finished ...')        
+
 
 #%% Here, we test the performance of conditional VAE (CVAE) for audio-visual speech enhancement. The CVAE here contains a feature extractor that is
 #   shared among all the visual subnetworks. That's why we put a "Tied" in its name
